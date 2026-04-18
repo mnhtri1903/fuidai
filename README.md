@@ -6,7 +6,7 @@ Dự án này được phát triển bởi **Wbiu (Nguyễn Minh Trí)** với m
 
 ---
 
-## 🌟 Đặc điểm nổi bật
+## Đặc điểm nổi bật
 
 - **Nhân cách hóa cực cao**: Fuid có chính kiến, có cảm xúc và biết cách "cà khịa" đúng lúc.
 - **Ngôn ngữ tự nhiên**: Chỉ sử dụng tiếng Việt, không dùng Emoji, thay vào đó là các text emoticon quen thuộc như `:v`, `:))`, `:((`.
@@ -14,7 +14,7 @@ Dự án này được phát triển bởi **Wbiu (Nguyễn Minh Trí)** với m
 - **Bộ nhớ thông minh**: Ghi nhớ ngữ cảnh hội thoại và những thông tin quan trọng cậu từng chia sẻ qua nhiều phiên làm việc khác nhau.
 - **Quyền riêng tư tuyệt đối**: Lịch sử trò chuyện và bộ nhớ được lưu trữ cục bộ trên thiết bị của cậu, không gửi lên máy chủ bên thứ ba.
 
-## 🛠 Thông số kỹ thuật
+## Thông số kỹ thuật
 
 - **Model nội bộ**: `fuidai-0.01`
 - **Ngôn ngữ lập trình**: Python
