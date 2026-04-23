@@ -1,5 +1,3 @@
----
-
 # Fuid Project: Vietnamese Conversational AI
 
 **Fuid** (phiên bản mô hình `fuidai-0.01`) là một dự án thử nghiệm về tác nhân hội thoại (conversational agent) dành riêng cho tiếng Việt. Dự án tập trung vào việc tạo ra trải nghiệm giao tiếp tự nhiên, mang đậm tính cá nhân hóa và xóa bỏ rào cản của các mô hình "trợ lý ảo" cứng nhắc thông thường.
@@ -20,7 +18,7 @@ Dự án được phát triển bởi **Wbiu (Nguyễn Minh Trí)**.
 ## Thông số kỹ thuật (Model Architecture)
 
 Mô hình mặc định được cấu hình với các tham số:
-* **Model Dimension ($d_{model}$)**: 780
+* **Model Dimension (d_model)**: 780
 * **Layers**: 14
 * **Attention Heads**: 12
 * **Block Size**: 512 tokens
@@ -40,14 +38,14 @@ Mô hình mặc định được cấu hình với các tham số:
 
 ---
 
-## ⚙️ Quy trình xử lý dữ liệu (Data Pipeline)
+## Quy trình xử lý dữ liệu (Data Pipeline)
 
 Để đảm bảo chất lượng mô hình, dữ liệu đầu vào phải trải qua hệ thống lọc chuyên sâu:
 
-1.  **Làm sạch kỹ thuật**: Loại bỏ HTML, mã rác, lỗi encoding và chuẩn hóa khoảng trắng.
-2.  **Lọc nội dung**: Loại bỏ Spam, quảng cáo, từ khóa SEO và các tiêu đề vô nghĩa.
-3.  **Kiểm soát ngôn ngữ**: Chỉ giữ lại các câu hoàn chỉnh, tự nhiên. Loại bỏ nội dung gãy gọn hoặc vô nghĩa.
-4.  **Tiêu chuẩn an toàn**: Loại bỏ nội dung 18+, cực đoan hoặc bạo lực.
+1. **Làm sạch kỹ thuật**: Loại bỏ HTML, mã rác, lỗi encoding và chuẩn hóa khoảng trắng.
+2. **Lọc nội dung**: Loại bỏ Spam, quảng cáo, từ khóa SEO và các tiêu đề vô nghĩa.
+3. **Kiểm soát ngôn ngữ**: Chỉ giữ lại các câu hoàn chỉnh, tự nhiên. Loại bỏ nội dung gãy gọn hoặc vô nghĩa.
+4. **Tiêu chuẩn an toàn**: Loại bỏ nội dung 18+, cực đoan hoặc bạo lực.
 
 ---
 
@@ -90,7 +88,4 @@ Hệ thống lọc dữ liệu của dự án tuân thủ các quy tắc nghiêm
 
 ---
 *Phát triển bởi Wbiu · Nguyễn Minh Trí*
-
----
-
-Hy vọng bản README này phản ánh đúng tâm huyết và kỹ thuật bạn đã đặt vào dự án. Bạn có muốn tôi bổ sung chi tiết hơn về các công thức toán học trong cơ chế Attention hay hướng dẫn cấu hình GPU không?
+```
