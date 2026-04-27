@@ -1,565 +1,524 @@
 """
-chuan_bi_data.py — Chuẩn bị dữ liệu huấn luyện cho Fuid AI
+chuan_bi_data.py — Tiền xử lý dữ liệu JSON → train.bin / val.bin
+━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Hỗ trợ 2 format đầu vào:
-  • Format JSONL chuẩn  (data_phan_1.jsonl):
-        {"messages": [{"role": "system"|"user"|"assistant", "content": "..."}]}
+Hỗ trợ TẤT CẢ định dạng JSON:
 
-  • Format JSON cũ  (2.json):
-        [{"title": "...", "conversation": [{"User": "...", "Assistant": "..."}]}]
-
-Tính năng chính:
-  Tuỳ chỉnh system role (nhân cách Fuid) cho từng mẫu
-  Chuyển đổi format cũ thành JSON chuẩn
-  Gộp nhiều file / thư mục nguồn
-  Tạo vocab.json, train.bin, val.bin
-  Thống kê chi tiết
+   {"text": "..."}
+   {"instruction": "...", "input": "...", "output": "..."}
+   {"question": "...", "answer": "..."}
+   {"user": "...", "assistant": "..."}
+   {"prompt": "...", "response": "..."}
+   {"input": "...", "output": "..."}
+   Bất kỳ tag nào khác — TỰ ĐỘNG ghép tất cả giá trị
 
 Cách dùng:
-  python chuan_bi_data.py                         
-  python chuan_bi_data.py --input data/ --output data_train/
-  python chuan_bi_data.py --no-system            
-  python chuan_bi_data.py --convert-only        
-  python chuan_bi_data.py --val-ratio 0.05    
+  python chuan_bi_data.py                          # dùng thư mục mặc định
+  python chuan_bi_data.py --data /path/to/jsons    # chỉ định thư mục JSON
+  python chuan_bi_data.py --out  /path/to/output   # chỉ định thư mục đầu ra
+  python chuan_bi_data.py --val_ratio 0.05         # tỉ lệ tập xác thực (mặc định 5%)
+  python chuan_bi_data.py --format instruct        # ép buộc định dạng instruction
+  python chuan_bi_data.py --sep "<|sep|>"          # dấu phân cách giữa các tag
+  python chuan_bi_data.py --show                   # xem trước 3 mẫu đầu
 """
 
 import argparse
 import json
+import os
 import random
 import sys
 from pathlib import Path
+
 import numpy as np
 
-if hasattr(sys.stdout, "reconfigure"):
-    sys.stdout.reconfigure(encoding="utf-8")
-
-ROLE_CONFIG = {
-    "them_system_role": True,
-
-    "system_prompt": (
-        "Mày là Fuid, trợ lý AI vui tính do Wbiu phát triển. "
-        "Mày nói chuyện kiểu bạn bè thân thiết: thân mật, hài hước, "
-        "đôi khi dùng tiếng lóng nhẹ nhưng không thô tục. "
-        "Mày thông minh, giải thích rõ ràng và luôn nhiệt tình giúp đỡ. "
-        "Khi gặp câu hỏi nguy hiểm hoặc phi đạo đức, mày từ chối nhẹ nhàng."
-    ),
-
-    "label_system":    "System",
-    "label_user":      "User",
-    "label_assistant": "Fuid",
-    "sep_turn":        "\n",
-    "sep_conv":        "\n\n",
-}
-
-DATA_CONFIG = {
-    "input_paths": [
-        "2.json",
-        "data/data_hf_da_chia/data_phan_1.jsonl",
-    ],
-    "output_dir":   "data_train",
-    "val_ratio":    0.10,
-    "seed":         42,
-    "convert_only": False,
-}
-
+# ─── Màu sắc terminal ────────────────────────────────────────────────────────
 DO   = "\033[91m"
 XANH = "\033[92m"
 VANG = "\033[93m"
 CYAN = "\033[96m"
 DAM  = "\033[1m"
 TAT  = "\033[0m"
-SEP  = "═" * 80
+SEP  = "=" * 80
 
-_KEY_USER = {
-    "user", "User", "USER",
-    "question", "Question", "QUESTION",
-    "q", "Q",
-    "input", "Input", "INPUT",
-    "human", "Human", "HUMAN",
-    "prompt", "Prompt", "PROMPT",
-    "nguoi_dung", "NguoiDung",
-    "hoi",
-}
-_KEY_ASST = {
-    "assistant", "Assistant", "ASSISTANT",
-    "answer", "Answer", "ANSWER",
-    "a", "A",
-    "output", "Output", "OUTPUT",
-    "bot", "Bot", "BOT",
-    "response", "Response", "RESPONSE",
-    "fuid", "Fuid", "FUID",
-    "ai", "AI",
-    "tra_loi", "TraLoi",
-    "dap",
-}
-_KEY_KIEN_THUC = {
-    "text", "Text", "TEXT",
-    "sentence", "Sentence", "SENTENCE",
-    "sentences", "Sentences",
-    "noi_dung", "van_ban", "data", "content", "Content",
+if hasattr(sys.stdout, "reconfigure"):
+    sys.stdout.reconfigure(encoding="utf-8")
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+
+# ─── Cấu hình mặc định ───────────────────────────────────────────────────────
+DEFAULT_CONFIG = {
+    "data_dir":   None,   # None = tự tìm trong PROJECT_ROOT
+    "output_dir": None,   # None = PROJECT_ROOT/data_train
+    "val_ratio":  0.05,   # 5% dữ liệu dành cho xác thực
+    "format":     "auto", # auto | text | instruct | qa | chat
+    "sep":        "\n",   # phân cách giữa các trường khi ghép
+    "shuffle":    True,   # xáo trộn trước khi chia train/val
+    "seed":       42,
+    "show":       False,  # xem trước một số mẫu
+    "show_n":     3,
 }
 
-
-def _nhan_dang_loai_object(obj: dict) -> str:
-    if not isinstance(obj, dict):
-        return "bo_qua"
-
-    if "messages" in obj:
-        msgs = obj["messages"]
-        if isinstance(msgs, list):
-            roles = {m.get("role", "") for m in msgs if isinstance(m, dict)}
-            if "user" in roles or "assistant" in roles:
-                return "conversation"
-
-    if "conversation" in obj:
-        return "conversation"
-
-    keys = set(obj.keys())
-    if keys & _KEY_USER or keys & _KEY_ASST:
-        return "conversation"
-
-    if keys & _KEY_KIEN_THUC:
-        return "kien_thuc"
-
-    return "bo_qua"
+def _fmt_text(item: dict, sep: str) -> str:
+    """{"text": "..."}"""
+    return item["text"].strip()
 
 
-def _nhan_dang_loai_list(data: list) -> str:
-    if not data:
-        return "bo_qua"
-    return _nhan_dang_loai_object(data[0])
+def _fmt_instruct(item: dict, sep: str) -> str:
+    """{"instruction": "...", "input": "...", "output": "...", "type": "..."}
+    Trường "type" (phong cách/thể loại) là tuỳ chọn — được thêm vào đầu nếu có.
+    """
+    parts = []
+    loai  = item.get("type", "").strip()
+    inst  = item.get("instruction", "").strip()
+    inp   = item.get("input", "").strip()
+    out   = item.get("output", "").strip()
+    if loai:
+        parts.append(f"### Phong cách:\n{loai}")
+    if inst:
+        parts.append(f"### Lệnh:\n{inst}")
+    if inp:
+        parts.append(f"### Đầu vào:\n{inp}")
+    if out:
+        parts.append(f"### Trả lời:\n{out}")
+    return sep.join(parts)
 
 
-def _phat_hien_role(d: dict):
-    u, a = None, None
-    for k, v in d.items():
-        if isinstance(v, str):
-            if k in _KEY_USER:
-                u = v.strip()
-            elif k in _KEY_ASST:
-                a = v.strip()
-    return u, a
+def _fmt_qa(item: dict, sep: str) -> str:
+    """{"question": "...", "answer": "..."}"""
+    q = item.get("question", "").strip()
+    a = item.get("answer",   "").strip()
+    parts = []
+    if q: parts.append(f"User: {q}")
+    if a: parts.append(f"Fuid: {a}")
+    return sep.join(parts)
 
 
-def _normalise_messages(messages: list) -> list:
-    ket_qua  = []
-    vi_tri   = 0
-    for msg in messages:
-        if not isinstance(msg, dict):
-            continue
-        role    = msg.get("role", "").strip().lower()
-        content = msg.get("content", "")
-
-        if role in ("user", "assistant", "system") and isinstance(content, str) and content.strip():
-            ket_qua.append({"role": role, "content": content.strip()})
-            if role != "system":
-                vi_tri += 1
-            continue
-
-        if isinstance(content, str) and content.strip():
-            role_gan = "user" if vi_tri % 2 == 0 else "assistant"
-            ket_qua.append({"role": role_gan, "content": content.strip()})
-            vi_tri += 1
-            continue
-
-        u, a = _phat_hien_role(msg)
-        if u:
-            ket_qua.append({"role": "user",      "content": u})
-            vi_tri += 1
-        if a:
-            ket_qua.append({"role": "assistant", "content": a})
-            vi_tri += 1
-
-    return ket_qua
+def _fmt_chat(item: dict, sep: str) -> str:
+    """{"user": "...", "assistant": "..."} hoặc {"prompt": "...", "response": "..."}"""
+    u = (item.get("user")    or item.get("prompt")   or "").strip()
+    a = (item.get("assistant") or item.get("response") or "").strip()
+    parts = []
+    if u: parts.append(f"User: {u}")
+    if a: parts.append(f"Fuid: {a}")
+    return sep.join(parts)
 
 
-def _doc_jsonl_raw(duong_dan: Path) -> list:
-    ket_qua = []
+def _fmt_input_output(item: dict, sep: str) -> str:
+    """{"input": "...", "output": "..."}"""
+    i = item.get("input",  "").strip()
+    o = item.get("output", "").strip()
+    parts = []
+    if i: parts.append(f"User: {i}")
+    if o: parts.append(f"Fuid: {o}")
+    return sep.join(parts)
+
+
+def _fmt_auto(item: dict, sep: str) -> str:
+    """Tự động ghép TẤT CẢ giá trị string trong dict"""
+    # Thứ tự ưu tiên kiểm tra định dạng đã biết
+    keys = set(item.keys())
+
+    if "text" in keys:
+        return _fmt_text(item, sep)
+
+    # data17.json và các định dạng instruction (có hoặc không có "type")
+    if "instruction" in keys and "output" in keys:
+        return _fmt_instruct(item, sep)
+
+    if "question" in keys and "answer" in keys:
+        return _fmt_qa(item, sep)
+
+    if ("user" in keys or "prompt" in keys) and \
+       ("assistant" in keys or "response" in keys):
+        return _fmt_chat(item, sep)
+
+    if "input" in keys and "output" in keys and "instruction" not in keys:
+        return _fmt_input_output(item, sep)
+
+    # Fallback: ghép tất cả giá trị string theo thứ tự key
+    parts = []
+    for k, v in item.items():
+        if isinstance(v, str) and v.strip():
+            parts.append(f"{k}: {v.strip()}")
+        elif isinstance(v, list):
+            # Xử lý conversations dạng list
+            for msg in v:
+                if isinstance(msg, dict):
+                    role    = msg.get("role", msg.get("from", ""))
+                    content = msg.get("content", msg.get("value", ""))
+                    if role and content:
+                        parts.append(f"{role}: {content.strip()}")
+                    elif content:
+                        parts.append(content.strip())
+    return sep.join(parts)
+
+
+FORMAT_MAP = {
+    "text":           _fmt_text,
+    "instruct":       _fmt_instruct,
+    "instruction":    _fmt_instruct,
+    "typed_instruct": _fmt_instruct,   # alias rõ ràng cho data17.json (instruction+type)
+    "qa":             _fmt_qa,
+    "chat":           _fmt_chat,
+    "input_output":   _fmt_input_output,
+    "auto":           _fmt_auto,
+}
+
+
+# ─── Đọc file JSON ────────────────────────────────────────────────────────────
+
+def doc_json(duong_dan: Path) -> list[dict]:
+    """Đọc file JSON, hỗ trợ: array [], object {}, jsonl (1 object/dòng)."""
     with open(duong_dan, "r", encoding="utf-8") as f:
-        for so_dong, dong in enumerate(f, 1):
-            dong = dong.strip()
-            if not dong:
-                continue
-            try:
-                ket_qua.append(json.loads(dong))
-            except json.JSONDecodeError as e:
-                print(f"  {VANG}[Bỏ qua] {duong_dan.name}:{so_dong} — {e}{TAT}")
-    return ket_qua
+        noi_dung = f.read().strip()
 
-
-def _chuyen_conversation(obj: dict) -> dict | None:
-    if "messages" in obj and isinstance(obj["messages"], list):
-        msgs = _normalise_messages(obj["messages"])
-        if msgs:
-            return {"loai": "conversation", "messages": msgs}
-        return None
-
-    if "conversation" in obj and isinstance(obj["conversation"], list):
-        msgs = []
-        for luot in obj["conversation"]:
-            u, a = _phat_hien_role(luot)
-            if u:
-                msgs.append({"role": "user",      "content": u})
-            if a:
-                msgs.append({"role": "assistant", "content": a})
-        if msgs:
-            return {"loai": "conversation", "messages": msgs,
-                    "_title": obj.get("title", "")}
-        return None
-
-    u, a = _phat_hien_role(obj)
-    msgs = []
-    if u:
-        msgs.append({"role": "user",      "content": u})
-    if a:
-        msgs.append({"role": "assistant", "content": a})
-    if msgs:
-        return {"loai": "conversation", "messages": msgs}
-    return None
-
-
-def _chuyen_kien_thuc(obj: dict) -> dict | None:
-    for k in _KEY_KIEN_THUC:
-        val = obj.get(k)
-        if isinstance(val, str) and val.strip():
-            return {"loai": "kien_thuc", "noi_dung": val.strip()}
-        if isinstance(val, list):
-            texts = [v.strip() for v in val if isinstance(v, str) and v.strip()]
-            if texts:
-                return {"loai": "kien_thuc", "noi_dung": " ".join(texts)}
-    return None
-
-
-def _chuyen_object(obj) -> dict | None:
-    if isinstance(obj, str) and obj.strip():
-        return {"loai": "kien_thuc", "noi_dung": obj.strip()}
-    if not isinstance(obj, dict):
-        return None
-    loai = _nhan_dang_loai_object(obj)
-    if loai == "conversation":
-        return _chuyen_conversation(obj)
-    if loai == "kien_thuc":
-        return _chuyen_kien_thuc(obj)
-    return None
-
-
-def doc_file(duong_dan: Path) -> list:
-    suffix = duong_dan.suffix.lower()
-
-    if suffix == ".txt":
-        print(f"  {VANG}[Bỏ qua — raw]{TAT} {duong_dan.name}")
+    if not noi_dung:
         return []
 
-    if suffix == ".jsonl":
-        raw_list  = _doc_jsonl_raw(duong_dan)
-        ket_qua   = [r for obj in raw_list if (r := _chuyen_object(obj))]
-        n_conv    = sum(1 for r in ket_qua if r["loai"] == "conversation")
-        n_kien    = sum(1 for r in ket_qua if r["loai"] == "kien_thuc")
-        print(f"  {XANH}[JSONL]{TAT} {duong_dan.name} → "
-              f"{n_conv} hội thoại / {n_kien} kiến thức")
-        return ket_qua
+    # Thử parse toàn bộ
+    try:
+        du_lieu = json.loads(noi_dung)
+        if isinstance(du_lieu, list):
+            return du_lieu
+        if isinstance(du_lieu, dict):
+            return [du_lieu]
+    except json.JSONDecodeError:
+        pass
 
-    if suffix == ".json":
-        with open(duong_dan, "r", encoding="utf-8") as f:
-            data_raw = json.load(f)
-
-        raw_list = data_raw if isinstance(data_raw, list) else [data_raw]
-        loai_file = _nhan_dang_loai_list(raw_list)
-
-        if loai_file == "kien_thuc":
-            texts = []
-            for obj in raw_list:
-                if isinstance(obj, dict):
-                    for k in _KEY_KIEN_THUC:
-                        val = obj.get(k)
-                        if isinstance(val, str) and val.strip():
-                            texts.append(val.strip())
-                            break
-                elif isinstance(obj, str) and obj.strip():
-                    texts.append(obj.strip())
-            ket_qua = [{"loai": "kien_thuc", "noi_dung": t} for t in texts]
-            print(f"  {CYAN}[JSON kiến thức]{TAT} {duong_dan.name} → {len(ket_qua)} mục")
-            return ket_qua
-
-        ket_qua = [r for obj in raw_list if (r := _chuyen_object(obj))]
-        n_conv  = sum(1 for r in ket_qua if r["loai"] == "conversation")
-        n_kien  = sum(1 for r in ket_qua if r["loai"] == "kien_thuc")
-        print(f"  {XANH}[JSON]{TAT} {duong_dan.name} → "
-              f"{n_conv} hội thoại / {n_kien} kiến thức")
-        return ket_qua
-
-    print(f"  {VANG}[Bỏ qua]{TAT} {duong_dan.name} — không hỗ trợ")
-    return []
-
-
-def doc_tat_ca(input_paths: list) -> list:
-    tat_ca = []
-    for duong_dan_str in input_paths:
-        p = Path(duong_dan_str)
-        if not p.exists():
-            print(f"  {VANG}[Không tìm thấy]{TAT} {p}")
-            continue
-        if p.is_dir():
-            files = (sorted(p.glob("**/*.json"))
-                   + sorted(p.glob("**/*.jsonl"))
-                   + sorted(p.glob("**/*.txt")))
-            print(f"\n  Thư mục {p}: {len(files)} file")
-            for f in files:
-                tat_ca.extend(doc_file(f))
-        else:
-            tat_ca.extend(doc_file(p))
-    return tat_ca
-
-
-def _co_system_role(messages: list) -> bool:
-    return any(m.get("role") == "system" for m in messages)
-
-
-def them_system_role(mau_list: list, cfg_role: dict) -> list:
-    ket_qua  = []
-    them_moi = 0
-    da_co    = 0
-
-    for mau in mau_list:
-        if mau["loai"] != "conversation":
-            ket_qua.append(mau)
-            continue
-
-        messages = mau.get("messages", [])
-        if _co_system_role(messages):
-            da_co += 1
-            ket_qua.append(mau)
-        else:
-            sys_msg = {"role": "system", "content": cfg_role["system_prompt"]}
-            ket_qua.append({**mau, "messages": [sys_msg] + messages})
-            them_moi += 1
-
-    print(f"  System role: {them_moi} mẫu thêm mới, {da_co} mẫu đã có sẵn")
-    return ket_qua
-
-
-def kiem_tra_hop_le(mau_list: list) -> list:
-    hop_le = []
-    loi    = 0
-    for mau in mau_list:
-        if mau["loai"] == "kien_thuc":
-            if mau.get("noi_dung", "").strip():
-                hop_le.append(mau)
-            else:
-                loi += 1
-            continue
-
-        if mau["loai"] == "conversation":
-            roles = [m.get("role") for m in mau.get("messages", [])]
-            if "user" in roles and "assistant" in roles:
-                hop_le.append(mau)
-            else:
-                loi += 1
-
-    if loi:
-        print(f"  {VANG}Bỏ qua {loi} mẫu không hợp lệ{TAT}")
-    return hop_le
-
-
-def _conversation_sang_van_ban(messages: list, cfg_role: dict) -> str:
-    nhan = {
-        "system":    cfg_role["label_system"],
-        "user":      cfg_role["label_user"],
-        "assistant": cfg_role["label_assistant"],
-    }
-    dong_list = []
-    for msg in messages:
-        role    = msg.get("role", "user")
-        content = msg.get("content", "").strip()
-        if not content:
-            continue
-        prefix = nhan.get(role, role.capitalize())
-        dong_list.append(f"{prefix}: {content}")
-    return cfg_role["sep_turn"].join(dong_list)
-
-
-def chuyen_sang_van_ban(mau_list: list, cfg_role: dict) -> list:
+    # Thử JSONL (mỗi dòng 1 JSON)
     ket_qua = []
-    for mau in mau_list:
-        if mau["loai"] == "conversation":
-            vb = _conversation_sang_van_ban(mau.get("messages", []), cfg_role)
-            if vb.strip():
-                ket_qua.append(vb)
-        elif mau["loai"] == "kien_thuc":
-            noi_dung = mau.get("noi_dung", "").strip()
-            if noi_dung:
-                ket_qua.append(noi_dung)
+    for so_dong, dong in enumerate(noi_dung.splitlines(), 1):
+        dong = dong.strip()
+        if not dong:
+            continue
+        try:
+            obj = json.loads(dong)
+            if isinstance(obj, dict):
+                ket_qua.append(obj)
+            elif isinstance(obj, list):
+                ket_qua.extend(obj)
+        except json.JSONDecodeError as e:
+            print(f"  {VANG}[Cảnh báo] Dòng {so_dong} trong {duong_dan.name}: {e}{TAT}")
+
     return ket_qua
 
 
-def tao_vocab(van_ban_list: list) -> dict:
-    ky_tu_set = set()
-    for vb in van_ban_list:
-        ky_tu_set.update(vb)
-    return {ch: idx for idx, ch in enumerate(sorted(ky_tu_set))}
+def quet_thu_muc_json(thu_muc: Path) -> list[Path]:
+    """Quét đệ quy tất cả file .json và .jsonl trong thư mục."""
+    files = []
+    for ext in ("*.json", "*.jsonl"):
+        files.extend(sorted(thu_muc.rglob(ext)))
+    return files
 
 
-def ma_hoa(van_ban: str, vocab: dict) -> list:
-    return [vocab[ch] for ch in van_ban if ch in vocab]
+# ─── Phát hiện định dạng ─────────────────────────────────────────────────────
+
+def phat_hien_dinh_dang(mau: dict) -> str:
+    keys = set(mau.keys())
+    if "text" in keys:
+        return "text"
+    # Hỗ trợ data17.json: instruction + output (+ input rỗng + type tuỳ chọn)
+    if "instruction" in keys and "output" in keys:
+        return "instruct"
+    if "question" in keys and "answer" in keys:
+        return "qa"
+    if ("user" in keys or "prompt" in keys) and \
+       ("assistant" in keys or "response" in keys):
+        return "chat"
+    if "input" in keys and "output" in keys:
+        return "input_output"
+    return "auto"
 
 
-def luu_bin(ids: list, duong_dan: Path):
-    np.array(ids, dtype=np.uint16).tofile(str(duong_dan))
+# ─── Tokenizer đơn giản (character-level) ────────────────────────────────────
+
+class TokenizerKyTu:
+    """Character-level tokenizer — giống TokenizerTV trong mo_hinh.py."""
+
+    def __init__(self):
+        self.char2idx: dict[str, int] = {}
+        self.idx2char: dict[int, str] = {}
+        self.vocab_size = 0
+
+    def xay_dung(self, van_ban: str):
+        """Xây dựng vocab từ văn bản."""
+        ky_tu = sorted(set(van_ban))
+        self.char2idx = {c: i for i, c in enumerate(ky_tu)}
+        self.idx2char = {i: c for i, c in enumerate(ky_tu)}
+        self.vocab_size = len(ky_tu)
+        print(f"  Vocab size: {self.vocab_size} ký tự")
+
+    def them_tu_vocab(self, vocab_dict: dict):
+        """Thêm ký tự mới vào vocab đã có (khi train tiếp với data mới)."""
+        them = 0
+        for c in vocab_dict:
+            if c not in self.char2idx:
+                idx = self.vocab_size
+                self.char2idx[c] = idx
+                self.idx2char[idx] = c
+                self.vocab_size += 1
+                them += 1
+        if them:
+            print(f"  {CYAN}Thêm {them} ký tự mới vào vocab{TAT}")
+
+    def ma_hoa(self, van_ban: str) -> list[int]:
+        return [self.char2idx[c] for c in van_ban if c in self.char2idx]
+
+    def luu(self, duong_dan: Path):
+        with open(duong_dan, "w", encoding="utf-8") as f:
+            json.dump(self.char2idx, f, ensure_ascii=False, indent=2)
+        print(f"  {XANH}Đã lưu vocab → {duong_dan}{TAT}")
+
+    def tai(self, duong_dan: Path):
+        with open(duong_dan, "r", encoding="utf-8") as f:
+            self.char2idx = json.load(f)
+        self.idx2char = {int(v): k for k, v in self.char2idx.items()}
+        self.vocab_size = len(self.char2idx)
+        print(f"  {XANH}Đã tải vocab: {self.vocab_size} ký tự ← {duong_dan}{TAT}")
 
 
-def tao_bin_files(van_ban_list: list, vocab: dict,
-                  output_dir: Path, val_ratio: float, seed: int, sep: str):
-    rng     = random.Random(seed)
-    indices = list(range(len(van_ban_list)))
-    rng.shuffle(indices)
+# ─── Thống kê tag ─────────────────────────────────────────────────────────────
 
-    n_val   = max(1, int(len(indices) * val_ratio))
-    idx_val = set(indices[:n_val])
-
-    train_vb = [van_ban_list[i] for i in indices if i not in idx_val]
-    val_vb   = [van_ban_list[i] for i in indices if i     in idx_val]
-
-    train_ids = ma_hoa(sep.join(train_vb), vocab)
-    val_ids   = ma_hoa(sep.join(val_vb),   vocab)
-
-    luu_bin(train_ids, output_dir / "train.bin")
-    luu_bin(val_ids,   output_dir / "val.bin")
-
-    return len(train_ids), len(val_ids), len(train_vb), len(val_vb)
+def thong_ke_tag(danh_sach: list[dict]) -> dict[str, int]:
+    dem = {}
+    for item in danh_sach:
+        for k in item.keys():
+            dem[k] = dem.get(k, 0) + 1
+    return dict(sorted(dem.items(), key=lambda x: -x[1]))
 
 
-def luu_jsonl_thong_nhat(mau_list: list, duong_dan: Path):
-    with open(duong_dan, "w", encoding="utf-8") as f:
-        for mau in mau_list:
-            mau_sach = {k: v for k, v in mau.items() if not k.startswith("_")}
-            f.write(json.dumps(mau_sach, ensure_ascii=False) + "\n")
-    print(f"  {XANH}Đã lưu:{TAT} {duong_dan} ({len(mau_list)} mẫu)")
+# ─── Hàm chính ───────────────────────────────────────────────────────────────
 
+def chuan_bi_data(cfg: dict):
+    random.seed(cfg.get("seed", 42))
 
-def luu_vi_du_van_ban(van_ban_list: list, duong_dan: Path, so_vi_du: int = 3):
-    with open(duong_dan, "w", encoding="utf-8") as f:
-        f.write(f"{'═'*80}\n")
-        f.write(f"VÍ DỤ ({so_vi_du}/{len(van_ban_list)} mẫu)\n")
-        f.write(f"{'═'*80}\n\n")
-        for i, vb in enumerate(van_ban_list[:so_vi_du]):
-            f.write(f"── Mẫu {i+1} {'─'*60}\n{vb}\n\n")
-    print(f"  {XANH}Ví dụ:{TAT} {duong_dan}")
+    # ── Đường dẫn ──────────────────────────────────────────────────────────
+    data_dir = Path(cfg["data_dir"]) if cfg.get("data_dir") else None
+    if data_dir is None:
+        # Tìm thư mục chứa JSON tự động
+        for thu_muc_ung_vien in [
+            PROJECT_ROOT / "data",
+            PROJECT_ROOT / "data_json",
+            PROJECT_ROOT / "dataset",
+            PROJECT_ROOT,
+        ]:
+            if any(thu_muc_ung_vien.rglob("*.json")):
+                data_dir = thu_muc_ung_vien
+                break
+        if data_dir is None:
+            raise FileNotFoundError(
+                "Không tìm thấy file JSON nào. "
+                "Hãy dùng --data /path/to/json_folder"
+            )
 
-
-def chuan_bi(data_cfg: dict = None, role_cfg: dict = None):
-    if data_cfg is None:
-        data_cfg = DATA_CONFIG
-    if role_cfg is None:
-        role_cfg = ROLE_CONFIG
-
-    output_dir = Path(data_cfg["output_dir"])
+    output_dir = Path(cfg["output_dir"]) if cfg.get("output_dir") else \
+                 PROJECT_ROOT / "data_train"
     output_dir.mkdir(parents=True, exist_ok=True)
 
+    val_ratio = float(cfg.get("val_ratio", 0.05))
+    fmt_name  = cfg.get("format", "auto")
+    sep       = cfg.get("sep", "\n")
+    do_shuffle = cfg.get("shuffle", True)
+    show      = cfg.get("show", False)
+    show_n    = int(cfg.get("show_n", 3))
+
+    fmt_fn = FORMAT_MAP.get(fmt_name, _fmt_auto)
+
     print(f"\n{CYAN}{DAM}{SEP}{TAT}")
-    print(f"{CYAN}{DAM}  FUID AI — CHUẨN BỊ DỮ LIỆU HUẤN LUYỆN{TAT}")
-    print(f"{CYAN}{DAM}{SEP}{TAT}\n")
-    print(f"  System role   : {'BẬT' if role_cfg['them_system_role'] else 'TẮT'}")
+    print(f"{CYAN}{DAM}  CHUẨN BỊ DỮ LIỆU — FUID AI{TAT}")
+    print(f"{CYAN}{DAM}{SEP}{TAT}")
+    print(f"  Thư mục JSON  : {data_dir}")
     print(f"  Đầu ra        : {output_dir}")
-    print(f"  Tỷ lệ val     : {data_cfg['val_ratio']*100:.0f}%")
-    print(f"  Chỉ chuyển đổi: {'CÓ' if data_cfg.get('convert_only') else 'KHÔNG'}")
+    print(f"  Định dạng     : {fmt_name}")
+    print(f"  Tỉ lệ val     : {val_ratio*100:.1f}%")
+    print(f"  Dấu phân cách : {repr(sep)}\n")
 
-    print(f"\n{DAM}[1/5] Đọc dữ liệu nguồn{TAT}")
-    mau_list = doc_tat_ca(data_cfg["input_paths"])
-    n_conv  = sum(1 for m in mau_list if m["loai"] == "conversation")
-    n_kien  = sum(1 for m in mau_list if m["loai"] == "kien_thuc")
-    print(f"  Tổng: {len(mau_list)} mẫu  ({n_conv} hội thoại, {n_kien} kiến thức)")
+    # ── Quét và đọc tất cả file JSON ───────────────────────────────────────
+    files = quet_thu_muc_json(data_dir)
+    if not files:
+        raise FileNotFoundError(f"Không tìm thấy file .json/.jsonl trong: {data_dir}")
 
-    if not mau_list:
-        print(f"\n{DO}Không có dữ liệu. Kiểm tra lại input_paths.{TAT}")
-        return
+    print(f"  {DAM}Tìm thấy {len(files)} file JSON:{TAT}")
+    tat_ca_items: list[dict] = []
 
-    print(f"\n{DAM}[2/5] Kiểm tra & lọc{TAT}")
-    mau_list = kiem_tra_hop_le(mau_list)
-    n_conv   = sum(1 for m in mau_list if m["loai"] == "conversation")
-    n_kien   = sum(1 for m in mau_list if m["loai"] == "kien_thuc")
-    print(f"  Còn lại: {len(mau_list)} mẫu  ({n_conv} hội thoại, {n_kien} kiến thức)")
+    for tep in files:
+        items = doc_json(tep)
+        if not items:
+            print(f"  {VANG}[Bỏ qua] {tep.name} — rỗng hoặc lỗi{TAT}")
+            continue
 
-    print(f"\n{DAM}[3/5] Xử lý system role{TAT}")
-    if role_cfg["them_system_role"]:
-        mau_list = them_system_role(mau_list, role_cfg)
-    else:
-        print("  System role bị tắt — giữ nguyên data")
+        # Phát hiện định dạng nếu auto
+        dinh_dang_tep = fmt_name
+        if fmt_name == "auto" and items:
+            dinh_dang_tep = phat_hien_dinh_dang(items[0])
 
-    print(f"\n{DAM}[4/5] Lưu file thống nhất{TAT}")
-    jsonl_path = output_dir / "merged.jsonl"
-    luu_jsonl_thong_nhat(mau_list, jsonl_path)
+        print(f"  ✓ {tep.name:40s} → {len(items):5d} mẫu  [{dinh_dang_tep}]")
+        tat_ca_items.extend(items)
 
-    if data_cfg.get("convert_only"):
-        print(f"\n{DAM}[5/5] Bỏ qua tokenise (convert-only){TAT}")
-        print(f"\n{XANH}{DAM}  HOÀN TẤT — {jsonl_path}{TAT}\n")
-        return
+    print(f"\n  {DAM}Tổng cộng: {len(tat_ca_items):,} mẫu{TAT}")
 
-    print(f"\n{DAM}[5/5] Tokenise & tạo file nhị phân{TAT}")
-    van_ban_list = chuyen_sang_van_ban(mau_list, role_cfg)
-    print(f"  Tổng văn bản : {len(van_ban_list)}")
+    # ── Thống kê tag ───────────────────────────────────────────────────────
+    tag_stats = thong_ke_tag(tat_ca_items)
+    print(f"\n  {DAM}Thống kê tag:{TAT}")
+    for tag, dem in tag_stats.items():
+        thanh = "█" * min(40, int(40 * dem / len(tat_ca_items)))
+        print(f"    {tag:20s}: {dem:6,}  {CYAN}{thanh}{TAT}")
 
-    vocab      = tao_vocab(van_ban_list)
+    # ── Chuyển đổi thành văn bản ───────────────────────────────────────────
+    print(f"\n  {DAM}Chuyển đổi sang văn bản...{TAT}")
+    van_ban_list: list[str] = []
+    loi = 0
+
+    for i, item in enumerate(tat_ca_items):
+        try:
+            # Dùng fmt_auto để tự nhận dạng từng item riêng lẻ
+            if fmt_name == "auto":
+                van_ban = _fmt_auto(item, sep)
+            else:
+                van_ban = fmt_fn(item, sep)
+
+            if van_ban.strip():
+                van_ban_list.append(van_ban.strip())
+            else:
+                loi += 1
+        except Exception as e:
+            loi += 1
+            if loi <= 5:
+                print(f"  {VANG}[Mẫu {i}] Lỗi: {e}{TAT}")
+
+    print(f"  Văn bản hợp lệ : {len(van_ban_list):,}")
+    if loi:
+        print(f"  {VANG}Mẫu lỗi/rỗng   : {loi:,}{TAT}")
+
+    if not van_ban_list:
+        raise ValueError("Không có văn bản nào sau khi chuyển đổi!")
+
+    # ── Xem trước ──────────────────────────────────────────────────────────
+    if show:
+        print(f"\n{DAM}  XEM TRƯỚC {show_n} MẪU ĐẦU:{TAT}")
+        for i, v in enumerate(van_ban_list[:show_n]):
+            print(f"  {'─'*60}")
+            print(f"  [Mẫu {i+1}]\n  {v[:400]}")
+        print(f"  {'─'*60}\n")
+
+    # ── Xáo trộn và chia train/val ─────────────────────────────────────────
+    if do_shuffle:
+        random.shuffle(van_ban_list)
+
+    n_val   = max(1, int(len(van_ban_list) * val_ratio))
+    n_train = len(van_ban_list) - n_val
+    train_vb = van_ban_list[:n_train]
+    val_vb   = van_ban_list[n_train:]
+
+    print(f"\n  Train: {n_train:,} mẫu  |  Val: {n_val:,} mẫu")
+
+    # ── Ghép văn bản với token phân cách ──────────────────────────────────
+    PHAN_CACH = "\n\n"
+    train_text = PHAN_CACH.join(train_vb)
+    val_text   = PHAN_CACH.join(val_vb)
+
+    print(f"  Train chars    : {len(train_text):,}")
+    print(f"  Val chars      : {len(val_text):,}")
+
+    # ── Xây dựng vocab ─────────────────────────────────────────────────────
     vocab_path = output_dir / "vocab.json"
-    with open(vocab_path, "w", encoding="utf-8") as f:
-        json.dump(vocab, f, ensure_ascii=False, indent=2)
-    print(f"  Vocab        : {len(vocab)} ký tự → {vocab_path}")
+    tokenizer  = TokenizerKyTu()
 
-    n_train, n_val, n_cv_train, n_cv_val = tao_bin_files(
-        van_ban_list, vocab, output_dir,
-        data_cfg["val_ratio"], data_cfg["seed"],
-        role_cfg["sep_conv"],
-    )
+    if vocab_path.exists():
+        print(f"\n  {CYAN}Tìm thấy vocab.json cũ — mở rộng thêm ký tự mới...{TAT}")
+        tokenizer.tai(vocab_path)
+        ky_tu_moi = set(train_text + val_text) - set(tokenizer.char2idx.keys())
+        if ky_tu_moi:
+            tokenizer.them_tu_vocab({c: 0 for c in sorted(ky_tu_moi)})
+        tokenizer.luu(vocab_path)
+    else:
+        print(f"\n  Xây dựng vocab mới...")
+        tokenizer.xay_dung(train_text + val_text)
+        tokenizer.luu(vocab_path)
 
-    luu_vi_du_van_ban(van_ban_list, output_dir / "vi_du_format.txt")
+    # ── Tokenize ───────────────────────────────────────────────────────────
+    print(f"\n  {DAM}Tokenize...{TAT}")
 
+    def luu_bin(van_ban: str, duong_dan: Path, ten: str):
+        ids = tokenizer.ma_hoa(van_ban)
+        arr = np.array(ids, dtype=np.uint16)
+        arr.tofile(duong_dan)
+        kb  = duong_dan.stat().st_size / 1024
+        print(f"  {XANH}✓ {ten:12s}: {len(ids):,} token → {duong_dan.name} "
+              f"({kb:.1f} KB){TAT}")
+        return len(ids)
+
+    n_train_tok = luu_bin(train_text, output_dir / "train.bin", "train")
+    n_val_tok   = luu_bin(val_text,   output_dir / "val.bin",   "val")
+
+    # ── Lưu metadata ───────────────────────────────────────────────────────
+    metadata = {
+        "tong_mau":          len(van_ban_list),
+        "mau_train":         n_train,
+        "mau_val":           n_val,
+        "token_train":       n_train_tok,
+        "token_val":         n_val_tok,
+        "vocab_size":        tokenizer.vocab_size,
+        "dinh_dang":         fmt_name,
+        "tag_stats":         tag_stats,
+        "files":             [str(f) for f in files],
+    }
+    meta_path = output_dir / "metadata.json"
+    with open(meta_path, "w", encoding="utf-8") as f:
+        json.dump(metadata, f, ensure_ascii=False, indent=2)
+
+    # ── Tổng kết ───────────────────────────────────────────────────────────
     print(f"\n{XANH}{DAM}{SEP}{TAT}")
-    print(f"{XANH}{DAM}  HOÀN TẤT{TAT}")
-    print(f"  Văn bản train  : {n_cv_train:,}  |  val: {n_cv_val:,}")
-    print(f"  Token train    : {n_train:,}  |  val: {n_val:,}")
-    print(f"  Vocab size     : {len(vocab)}")
-    print(f"  Đầu ra         : {output_dir}/")
-    print(f"    ├── train.bin")
-    print(f"    ├── val.bin")
-    print(f"    ├── vocab.json")
-    print(f"    ├── merged.jsonl")
-    print(f"    └── vi_du_format.txt")
+    print(f"{XANH}{DAM}  HOÀN TẤT CHUẨN BỊ DỮ LIỆU{TAT}")
+    print(f"{XANH}{DAM}  ├─ vocab.json    : {tokenizer.vocab_size} ký tự{TAT}")
+    print(f"{XANH}{DAM}  ├─ train.bin     : {n_train_tok:,} token  ({n_train:,} mẫu){TAT}")
+    print(f"{XANH}{DAM}  ├─ val.bin       : {n_val_tok:,} token  ({n_val:,} mẫu){TAT}")
+    print(f"{XANH}{DAM}  └─ metadata.json : thống kê đầy đủ{TAT}")
     print(f"{XANH}{DAM}{SEP}{TAT}\n")
+    print(f"  {DAM}Bước tiếp theo:{TAT}")
+    print(f"    python huan_luyen.py")
+    print(f"    # hoặc train tiếp:")
+    print(f"    python hlpb2.py\n")
 
-    if role_cfg["them_system_role"]:
-        print(f"{VANG}System prompt:{TAT}")
-        print(f'  "{role_cfg["system_prompt"]}"\n')
 
+# ─── CLI ─────────────────────────────────────────────────────────────────────
 
 def _parse_args():
-    p = argparse.ArgumentParser(description="Chuẩn bị dữ liệu huấn luyện cho Fuid AI")
-    p.add_argument("--input",         nargs="+")
-    p.add_argument("--output",        default=None)
-    p.add_argument("--no-system",     action="store_true")
-    p.add_argument("--system-prompt", default=None)
-    p.add_argument("--val-ratio",     type=float, default=None)
-    p.add_argument("--convert-only",  action="store_true")
-    p.add_argument("--seed",          type=int,   default=None)
-    return p.parse_args()
+    ap = argparse.ArgumentParser(
+        description="Tiền xử lý JSON → train.bin/val.bin cho FUID AI",
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    ap.add_argument("--data",      type=str,   default=None,
+                    help="Thư mục chứa file JSON/JSONL")
+    ap.add_argument("--out",       type=str,   default=None,
+                    help="Thư mục đầu ra (mặc định: ./data_train)")
+    ap.add_argument("--val_ratio", type=float, default=0.05,
+                    help="Tỉ lệ tập xác thực (mặc định: 0.05)")
+    ap.add_argument("--format",    type=str,   default="auto",
+                    choices=list(FORMAT_MAP.keys()),
+                    help="Định dạng JSON (mặc định: auto)")
+    ap.add_argument("--sep",       type=str,   default="\n",
+                    help="Dấu phân cách giữa các trường (mặc định: newline)")
+    ap.add_argument("--no_shuffle", action="store_true",
+                    help="Không xáo trộn dữ liệu")
+    ap.add_argument("--seed",      type=int,   default=42)
+    ap.add_argument("--show",      action="store_true",
+                    help="Xem trước một số mẫu sau khi chuyển đổi")
+    ap.add_argument("--show_n",    type=int,   default=3)
+    return ap.parse_args()
 
 
 if __name__ == "__main__":
-    args     = _parse_args()
-    data_cfg = dict(DATA_CONFIG)
-    role_cfg = dict(ROLE_CONFIG)
-
-    if args.input:
-        data_cfg["input_paths"] = args.input
-    if args.output:
-        data_cfg["output_dir"]  = args.output
-    if args.val_ratio is not None:
-        data_cfg["val_ratio"]   = args.val_ratio
-    if args.seed is not None:
-        data_cfg["seed"]        = args.seed
-    if args.convert_only:
-        data_cfg["convert_only"] = True
-    if args.no_system:
-        role_cfg["them_system_role"] = False
-    if args.system_prompt:
-        role_cfg["system_prompt"] = args.system_prompt
-
-    chuan_bi(data_cfg, role_cfg)
+    args = _parse_args()
+    cfg  = {
+        "data_dir":   args.data,
+        "output_dir": args.out,
+        "val_ratio":  args.val_ratio,
+        "format":     args.format,
+        "sep":        args.sep.replace("\\n", "\n").replace("\\t", "\t"),
+        "shuffle":    not args.no_shuffle,
+        "seed":       args.seed,
+        "show":       args.show,
+        "show_n":     args.show_n,
+    }
+    chuan_bi_data(cfg)
