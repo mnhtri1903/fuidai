@@ -1,6 +1,6 @@
 # Fuid Project: Vietnamese Conversational AI
 
-**Fuid** (phiên bản mô hình `fuidai-0.01`) là một dự án thử nghiệm về tác nhân hội thoại (conversational agent) dành riêng cho tiếng Việt. Dự án tập trung vào việc tạo ra trải nghiệm giao tiếp tự nhiên, mang đậm tính cá nhân hóa và xóa bỏ rào cản của các mô hình "trợ lý ảo" cứng nhắc thông thường.
+**Fuid** (phiên bản mô hình `fuidai`) là một dự án thử nghiệm về tác nhân hội thoại (conversational agent) dành riêng cho tiếng Việt. Dự án tập trung vào việc tạo ra trải nghiệm giao tiếp tự nhiên, mang đậm tính cá nhân hóa và xóa bỏ rào cản của các mô hình "trợ lý ảo" cứng nhắc thông thường.
 
 Dự án được phát triển bởi **Wbiu (Nguyễn Minh Trí)**.
 
