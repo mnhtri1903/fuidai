@@ -69,7 +69,7 @@ python huan_luyen.py
 ```
 Để huấn luyện tiếp từ một checkpoint:
 ```bash
-python hlpb2.py --ckpt dau_ra_fuidai/fuid_best.pt --epochs 100
+python hlpb2.py --ckpt dau_ra_fuidai/fuid_best.pt --epochs 6
 ```
 
 ### 4. Trò chuyện
